@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from datetime import datetime, timezone, timedelta
 import time
@@ -167,9 +168,37 @@ def format_teachers():
         lines.append(f"{gender_emoji(name)} <b>{name}</b>\n   {info['role']}\n   📚 {subjects}")
     return "\n\n".join(lines)
 
-def send_message(chat_id, text):
+MENU_KEYBOARD = {
+    "keyboard": [
+        [{"text": "📅 Сегодня"}, {"text": "🌅 Завтра"}],
+        [{"text": "🗓 Неделя"}, {"text": "⏭ Следующая пара"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+# Текст кнопки -> команда
+BUTTONS = {
+    "📅 Сегодня": "/schedule",
+    "🌅 Завтра": "/tomorrow",
+    "🗓 Неделя": "/week",
+    "⏭ Следующая пара": "/next",
+}
+
+DAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
+
+DAYS_KEYBOARD = {
+    "inline_keyboard": [
+        [{"text": DAY_SHORT[i], "callback_data": f"day:{i}"} for i in range(0, 3)],
+        [{"text": DAY_SHORT[i], "callback_data": f"day:{i}"} for i in range(3, 6)],
+    ]
+}
+
+def send_message(chat_id, text, reply_markup=None):
+    markup = MENU_KEYBOARD if reply_markup is None else reply_markup
     r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                      data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
+                      data={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                            "reply_markup": json.dumps(markup)}, timeout=10)
     print(f"send {chat_id}: {r.status_code}", flush=True)
     if r.status_code != 200:
         print(r.text, flush=True)
@@ -208,9 +237,12 @@ def handle_update(update):
     chat_id = message["chat"]["id"]
     text = (message.get("text") or "").strip()
     print(f"msg {chat_id}: {text!r}", flush=True)
-    if not text.startswith("/"):
+    if text in BUTTONS:
+        cmd = BUTTONS[text]
+    elif text.startswith("/"):
+        cmd = text.split()[0].lower().split("@")[0]
+    else:
         return
-    cmd = text.split()[0].lower().split("@")[0]
     if cmd in ("/start", "/help"):
         send_message(chat_id, HELP_TEXT)
     elif cmd in ("/schedule", "/расписание"):
