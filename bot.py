@@ -1,11 +1,11 @@
+import os
 import requests
 from datetime import datetime, timezone, timedelta
 import time
 import traceback
 
-import os
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
+# Токен берём из переменной окружения: export BOT_TOKEN="новый_токен"
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "ВСТАВЬ_НОВЫЙ_ТОКЕН"
 OMSK = timezone(timedelta(hours=6))
 
 SCHEDULE = {
@@ -54,16 +54,16 @@ def now_omsk():
 def gender_emoji(full_name):
     return "👨‍🎓" if full_name.strip().split()[-1].endswith("ич") else "👩‍🎓"
 
-def _to_time(hhmm):
+def _to_time(hhmm, base=None):
     h, m = map(int, hhmm.split(":"))
-    n = now_omsk()
-    return n.replace(hour=h, minute=m, second=0, microsecond=0)
+    base = base or now_omsk()
+    return base.replace(hour=h, minute=m, second=0, microsecond=0)
 
-def format_schedule(weekday):
+def format_schedule(weekday, when="Сегодня"):
     day_name = WEEKDAY_NAMES[weekday]
     pairs = SCHEDULE.get(weekday, [])
     if not pairs:
-        return f"📅 <b>{day_name}</b>\n\nСегодня пар нет 🎉\n\nХорошего дня ✍️"
+        return f"📅 <b>{day_name}</b>\n\n{when} пар нет 🎉\n\nХорошего дня ✍️"
     blocks = [f"📅 <b>{day_name}</b>\n"]
     for i, pair in enumerate(pairs, start=1):
         lines = [f"{i}. {pair['subject']} ({pair['start']}-{pair['end']})"]
@@ -76,15 +76,55 @@ def format_schedule(weekday):
             blocks.append(f"перерыв {gap} мин 🍜" if gap >= 30 else f"перерыв {gap} мин")
     return "\n\n".join(blocks) + "\n\nХорошего дня ✍️"
 
+def format_week():
+    blocks = ["🗓 <b>Расписание на неделю</b>"]
+    for weekday in range(7):
+        pairs = SCHEDULE.get(weekday, [])
+        if not pairs:
+            blocks.append(f"<b>{WEEKDAY_NAMES[weekday]}</b>\nпар нет 🎉")
+            continue
+        lines = [f"<b>{WEEKDAY_NAMES[weekday]}</b>"]
+        for i, pair in enumerate(pairs, start=1):
+            lines.append(f"{i}. {pair['start']} — {pair['subject']}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
 def format_timedelta(td):
     total = max(0, int(td.total_seconds()))
-    hours, rem = divmod(total, 3600)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
     minutes, seconds = divmod(rem, 60)
+    if days > 0:
+        return f"{days} д {hours} ч"
     if hours > 0:
         return f"{hours} ч {minutes} мин"
     if minutes > 0:
         return f"{minutes} мин {seconds} сек"
     return f"{seconds} сек"
+
+def get_next_pair():
+    n = now_omsk()
+    for offset in range(8):
+        day = n + timedelta(days=offset)
+        for pair in SCHEDULE.get(day.weekday(), []):
+            start = _to_time(pair["start"], day)
+            if start <= n:
+                continue
+            if offset == 0:
+                when = "сегодня"
+            elif offset == 1:
+                when = "завтра"
+            else:
+                when = WEEKDAY_NAMES[day.weekday()].lower()
+            lines = [
+                f"⏭ Следующая пара: <b>{pair['subject']}</b>",
+                f"🕘 {when}, {pair['start']}-{pair['end']}",
+            ]
+            for role, name in pair["teachers"]:
+                lines.append(f"{role} {gender_emoji(name)} <b><i>{name}</i></b>")
+            lines.append(f"⏰ Через: <b>{format_timedelta(start - n)}</b>")
+            return "\n".join(lines)
+    return "❓ Впереди пар не нашлось"
 
 def get_time_status():
     n = now_omsk()
@@ -128,6 +168,18 @@ def send_message(chat_id, text):
     if r.status_code != 200:
         print(r.text, flush=True)
 
+HELP_TEXT = (
+    "Привет! Я бот расписания музфака 🎵\n\n"
+    "Команды:\n"
+    "/schedule — расписание на сегодня\n"
+    "/tomorrow — расписание на завтра\n"
+    "/week — расписание на неделю\n"
+    "/next — следующая пара\n"
+    "/time — сколько осталось до перемены / пары\n"
+    "/name — педагоги и предметы\n"
+    "/help — эта справка"
+)
+
 def handle_update(update):
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -139,9 +191,16 @@ def handle_update(update):
         return
     cmd = text.split()[0].lower().split("@")[0]
     if cmd in ("/start", "/help"):
-        send_message(chat_id, "Привет! Я бот расписания музфака 🎵\n\nКоманды:\n/schedule — расписание на сегодня\n/time — сколько осталось до перемены / пары\n/name — педагоги и предметы\n/help — эта справка")
+        send_message(chat_id, HELP_TEXT)
     elif cmd in ("/schedule", "/расписание"):
         send_message(chat_id, format_schedule(now_omsk().weekday()))
+    elif cmd in ("/tomorrow", "/завтра"):
+        tomorrow = (now_omsk() + timedelta(days=1)).weekday()
+        send_message(chat_id, format_schedule(tomorrow, when="Завтра"))
+    elif cmd in ("/week", "/неделя"):
+        send_message(chat_id, format_week())
+    elif cmd in ("/next", "/следующая"):
+        send_message(chat_id, get_next_pair())
     elif cmd in ("/time", "/время"):
         send_message(chat_id, get_time_status())
     elif cmd in ("/name", "/имена", "/teachers"):
