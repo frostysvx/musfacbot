@@ -2,11 +2,17 @@ import os
 import requests
 from datetime import datetime, timezone, timedelta
 import time
+import threading
 import traceback
 
 # Токен берём из переменной окружения: export BOT_TOKEN="новый_токен"
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or "ВСТАВЬ_НОВЫЙ_ТОКЕН"
 OMSK = timezone(timedelta(hours=6))
+
+# Напоминание про обед: ID чатов через запятую в переменной LUNCH_CHAT_IDS
+LUNCH_CHAT_IDS = [c.strip() for c in os.environ.get("LUNCH_CHAT_IDS", "").split(",") if c.strip()]
+LUNCH_TIME = "11:55"
+LUNCH_TEXT = "через 15 мин ланч 🍽️🧃"
 
 SCHEDULE = {
     0: [
@@ -168,6 +174,21 @@ def send_message(chat_id, text):
     if r.status_code != 200:
         print(r.text, flush=True)
 
+def lunch_reminder_loop():
+    last_sent = None
+    while True:
+        try:
+            n = now_omsk()
+            if (n.strftime("%H:%M") == LUNCH_TIME
+                    and last_sent != n.date()
+                    and SCHEDULE.get(n.weekday())):
+                for chat_id in LUNCH_CHAT_IDS:
+                    send_message(chat_id, LUNCH_TEXT)
+                last_sent = n.date()
+        except Exception as e:
+            print("lunch:", e, flush=True)
+        time.sleep(20)
+
 HELP_TEXT = (
     "Привет! Я бот расписания музфака 🎵\n\n"
     "Команды:\n"
@@ -203,6 +224,8 @@ def handle_update(update):
         send_message(chat_id, get_next_pair())
     elif cmd in ("/time", "/время"):
         send_message(chat_id, get_time_status())
+    elif cmd == "/chatid":
+        send_message(chat_id, f"ID этого чата: <code>{chat_id}</code>")
     elif cmd in ("/name", "/имена", "/teachers"):
         send_message(chat_id, format_teachers())
     else:
@@ -210,6 +233,7 @@ def handle_update(update):
 
 def main():
     print("Бот запущен", flush=True)
+    threading.Thread(target=lunch_reminder_loop, daemon=True).start()
     offset = 0
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     while True:
