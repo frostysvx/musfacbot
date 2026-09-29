@@ -1,204 +1,303 @@
-"""Мини-игра «Угадай интервал» для Telegram-бота.
-
-Бот синтезирует два звука (снизу вверх), присылает аудио и кнопки с интервалами.
-Кто первым нажмёт правильный вариант, получает очко. Рейтинг хранится в SQLite.
-"""
-import html
-import io
-import json
-import math
 import os
-import random
-import sqlite3
-import struct
-import threading
-import wave
-
+import json
 import requests
+from datetime import datetime, timezone, timedelta
+import time
+import threading
+import traceback
 
+import interval_game
+
+# Токен берём из переменной окружения: export BOT_TOKEN="новый_токен"
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or "ВСТАВЬ_НОВЫЙ_ТОКЕН"
-# На Railway подключи Volume (например /data) и задай DB_PATH=/data/game.db,
-# иначе рейтинг обнулится после редеплоя.
-DB_PATH = os.environ.get("DB_PATH", "game.db")
+OMSK = timezone(timedelta(hours=6))
 
-# полутоны -> (короткое название, полное название)
-INTERVALS = {
-    1: ("м2", "малая секунда"),
-    2: ("б2", "большая секунда"),
-    3: ("м3", "малая терция"),
-    4: ("б3", "большая терция"),
-    5: ("ч4", "чистая кварта"),
-    6: ("тритон", "тритон"),
-    7: ("ч5", "чистая квинта"),
-    8: ("м6", "малая секста"),
-    9: ("б6", "большая секста"),
-    10: ("м7", "малая септима"),
-    11: ("б7", "большая септима"),
-    12: ("ч8", "чистая октава"),
+# Напоминание про обед: ID чатов через запятую в переменной LUNCH_CHAT_IDS
+LUNCH_CHAT_IDS = [c.strip() for c in os.environ.get("LUNCH_CHAT_IDS", "").split(",") if c.strip()]
+LUNCH_TIME = "11:55"
+LUNCH_TEXT = "через 15 мин ланч 🍽️🧃"
+
+SCHEDULE = {
+    0: [
+        {"start": "09:00", "end": "10:30", "subject": "История России", "teachers": [("доцент", "Озерова Ольга Алексеевна")]},
+        {"start": "10:40", "end": "12:10", "subject": "Иностранный язык", "teachers": [("доцент", "Назаров Сергей Владимирович")]},
+        {"start": "12:40", "end": "14:10", "subject": "Основы российской гос-ти", "teachers": [("профессор", "Безвиконная Елена Владимировна")]},
+        {"start": "14:20", "end": "15:50", "subject": "Хоровое пение", "teachers": [("доцент", "Капустина Татьяна Вячеславовна")]},
+    ],
+    1: [
+        {"start": "09:00", "end": "10:30", "subject": "Муз. инструментал. исполнительство", "teachers": [("доцент", "Тулаева Виктория Викторовна")]},
+        {"start": "10:40", "end": "12:10", "subject": "Учеб. практика - хор", "teachers": [("доцент", "Капустина Татьяна Вячеславовна")]},
+        {"start": "12:40", "end": "14:10", "subject": "Вокал исполнительство", "teachers": [("доцент", "Капустина Татьяна Вячеславовна")]},
+    ],
+    2: [
+        {"start": "09:00", "end": "10:30", "subject": "Возрастная анатомия", "teachers": [("доцент", "Корчагина Татьяна Александровна")]},
+        {"start": "10:40", "end": "12:10", "subject": "Возрастная анатомия / ОМЗ / ОРГ", "teachers": [("доцент", "Корчагина Татьяна Александровна"), ("профессор", "Безвиконная Елена Владимировна")]},
+        {"start": "12:40", "end": "14:10", "subject": "История заруб. музыки", "teachers": [("доцент", "Тулаева Виктория Викторовна")]},
+        {"start": "14:20", "end": "15:50", "subject": "Основы мед. знаний", "teachers": [("доцент", "Корчагина Татьяна Александровна")]},
+    ],
+    3: [
+        {"start": "09:00", "end": "10:30", "subject": "Физра", "teachers": [("доцент", "Матюнина Наталья Васильевна")]},
+        {"start": "10:40", "end": "12:10", "subject": "Сольфеджио", "teachers": [("доцент", "Лев Яков Борисович")]},
+        {"start": "12:40", "end": "14:10", "subject": "Хороведение", "teachers": [("доцент", "Лев Яков Борисович")]},
+        {"start": "14:20", "end": "15:50", "subject": "Хороведение", "teachers": [("доцент", "Лев Яков Борисович")]},
+    ],
+    4: [
+        {"start": "09:00", "end": "10:30", "subject": "История России", "teachers": [("доцент", "Озерова Ольга Алексеевна")]},
+        {"start": "10:40", "end": "12:10", "subject": "История России", "teachers": [("доцент", "Озерова Ольга Алексеевна")]},
+        {"start": "12:40", "end": "14:10", "subject": "Муз. инструментал. исполнительство", "teachers": [("доцент", "Тулаева Виктория Викторовна")]},
+    ],
+    5: [
+        {"start": "09:00", "end": "10:30", "subject": "Возрастная анатомия", "teachers": [("доцент", "Корчагина Татьяна Александровна")]},
+        {"start": "10:40", "end": "12:10", "subject": "Возрастная анатомия", "teachers": [("доцент", "Корчагина Татьяна Александровна")]},
+        {"start": "12:40", "end": "14:10", "subject": "Основы рос. гос-ти", "teachers": [("профессор", "Безвиконная Елена Владимировна")]},
+        {"start": "14:20", "end": "15:50", "subject": "Физра", "teachers": [("доцент", "Матюнина Наталья Васильевна")]},
+    ],
+    6: [],
 }
 
-# chat_id -> текущий вопрос
-QUESTIONS = {}
-_db_lock = threading.Lock()
+WEEKDAY_NAMES = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 
+def now_omsk():
+    return datetime.now(OMSK)
 
-# ---------- Telegram ----------
+def gender_emoji(full_name):
+    return "👨‍🎓" if full_name.strip().split()[-1].endswith("ич") else "👩‍🎓"
 
-def _tg(method, data=None, files=None):
-    r = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
-        data=data, files=files, timeout=30,
-    )
-    if r.status_code != 200:
-        print(f"{method}: {r.status_code} {r.text}", flush=True)
-    return r
+def _to_time(hhmm, base=None):
+    h, m = map(int, hhmm.split(":"))
+    base = base or now_omsk()
+    return base.replace(hour=h, minute=m, second=0, microsecond=0)
 
+def format_schedule(weekday, when="Сегодня"):
+    day_name = WEEKDAY_NAMES[weekday]
+    pairs = SCHEDULE.get(weekday, [])
+    if not pairs:
+        return f"📅 <b>{day_name}</b>\n\n{when} пар нет 🎉\n\nХорошего дня ✍️"
+    blocks = [f"📅 <b>{day_name}</b>\n"]
+    for i, pair in enumerate(pairs, start=1):
+        lines = [f"{i}. {pair['subject']} ({pair['start']}-{pair['end']})"]
+        for role, name in pair["teachers"]:
+            lines.append(f"   {role} {gender_emoji(name)} <b><i>{name}</i></b>")
+        blocks.append("\n".join(lines))
+        if i < len(pairs):
+            next_pair = pairs[i]
+            gap = int((_to_time(next_pair["start"]) - _to_time(pair["end"])).total_seconds() // 60)
+            blocks.append(f"перерыв {gap} мин 🍜" if gap >= 30 else f"перерыв {gap} мин")
+    return "\n\n".join(blocks) + "\n\nХорошего дня ✍️"
 
-def _answer_cb(cb_id, text=""):
-    _tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": text})
+def format_week():
+    blocks = ["🗓 <b>Расписание на неделю</b>"]
+    for weekday in range(7):
+        pairs = SCHEDULE.get(weekday, [])
+        if not pairs:
+            blocks.append(f"<b>{WEEKDAY_NAMES[weekday]}</b>\nпар нет 🎉")
+            continue
+        lines = [f"<b>{WEEKDAY_NAMES[weekday]}</b>"]
+        for i, pair in enumerate(pairs, start=1):
+            lines.append(f"{i}. {pair['start']} — {pair['subject']}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
+def format_timedelta(td):
+    total = max(0, int(td.total_seconds()))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if days > 0:
+        return f"{days} д {hours} ч"
+    if hours > 0:
+        return f"{hours} ч {minutes} мин"
+    if minutes > 0:
+        return f"{minutes} мин {seconds} сек"
+    return f"{seconds} сек"
 
-# ---------- База (рейтинг) ----------
+def get_next_pair():
+    n = now_omsk()
+    for offset in range(8):
+        day = n + timedelta(days=offset)
+        for pair in SCHEDULE.get(day.weekday(), []):
+            start = _to_time(pair["start"], day)
+            if start <= n:
+                continue
+            if offset == 0:
+                when = "сегодня"
+            elif offset == 1:
+                when = "завтра"
+            else:
+                when = WEEKDAY_NAMES[day.weekday()].lower()
+            lines = [
+                f"⏭ Следующая пара: <b>{pair['subject']}</b>",
+                f"🕘 {when}, {pair['start']}-{pair['end']}",
+            ]
+            for role, name in pair["teachers"]:
+                lines.append(f"{role} {gender_emoji(name)} <b><i>{name}</i></b>")
+            lines.append(f"⏰ Через: <b>{format_timedelta(start - n)}</b>")
+            return "\n".join(lines)
+    return "❓ Впереди пар не нашлось"
 
-def db_init():
-    with _db_lock, sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS scores ("
-            "chat_id INTEGER, user_id INTEGER, name TEXT, "
-            "points INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))"
-        )
+def get_time_status():
+    n = now_omsk()
+    weekday = n.weekday()
+    pairs = SCHEDULE.get(weekday, [])
+    if not pairs:
+        return "📅 Сегодня пар нет 🎉\n\nХорошего дня ✍️"
+    timed_pairs = [{"start": _to_time(p["start"]), "end": _to_time(p["end"]), "subject": p["subject"]} for p in pairs]
+    if n < timed_pairs[0]["start"]:
+        left = timed_pairs[0]["start"] - n
+        return f"⏰ До первой пары осталось: <b>{format_timedelta(left)}</b>\n📚 {timed_pairs[0]['subject']} ({timed_pairs[0]['start'].strftime('%H:%M')})"
+    if n >= timed_pairs[-1]["end"]:
+        return "🏁 Пары на сегодня закончились\n\nХорошего вечера ✍️"
+    for i, pair in enumerate(timed_pairs):
+        if pair["start"] <= n < pair["end"]:
+            return f"📚 Сейчас идёт: <b>{pair['subject']}</b>\n⏰ До конца пары (до перемены): <b>{format_timedelta(pair['end'] - n)}</b>"
+        if i + 1 < len(timed_pairs) and pair["end"] <= n < timed_pairs[i+1]["start"]:
+            np = timed_pairs[i+1]
+            return f"🍜 Сейчас перемена\n⏰ До следующей пары: <b>{format_timedelta(np['start'] - n)}</b>\n📚 {np['subject']} ({np['start'].strftime('%H:%M')})"
+    return "❓ Не удалось определить статус"
 
+def format_teachers():
+    teachers = {}
+    for day_pairs in SCHEDULE.values():
+        for pair in day_pairs:
+            for role, name in pair["teachers"]:
+                if name not in teachers:
+                    teachers[name] = {"role": role, "subjects": set()}
+                teachers[name]["subjects"].add(pair["subject"])
+    lines = ["👩‍🏫 <b>Педагоги и предметы</b>\n"]
+    for name in sorted(teachers.keys(), key=lambda n: n.split()[0]):
+        info = teachers[name]
+        subjects = ", ".join(sorted(info["subjects"]))
+        lines.append(f"{gender_emoji(name)} <b>{name}</b>\n   {info['role']}\n   📚 {subjects}")
+    return "\n\n".join(lines)
 
-def _add_point(chat_id, user_id, name):
-    with _db_lock, sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "INSERT INTO scores (chat_id, user_id, name, points) VALUES (?, ?, ?, 1) "
-            "ON CONFLICT(chat_id, user_id) DO UPDATE SET points = points + 1, name = excluded.name",
-            (chat_id, user_id, name),
-        )
+MENU_KEYBOARD = {
+    "keyboard": [
+        [{"text": "📅 Сегодня"}, {"text": "🌅 Завтра"}],
+        [{"text": "🗓 Неделя"}, {"text": "⏭ Следующая пара"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
 
+# Текст кнопки -> команда
+BUTTONS = {
+    "📅 Сегодня": "/schedule",
+    "🌅 Завтра": "/tomorrow",
+    "🗓 Неделя": "/week",
+    "⏭ Следующая пара": "/next",
+}
 
-def format_top(chat_id):
-    with _db_lock, sqlite3.connect(DB_PATH) as c:
-        rows = c.execute(
-            "SELECT name, points FROM scores WHERE chat_id = ? "
-            "ORDER BY points DESC LIMIT 10",
-            (chat_id,),
-        ).fetchall()
-    if not rows:
-        return "Пока никто не играл. Жми /interval 🎵"
-    medals = ["🥇", "🥈", "🥉"]
-    lines = ["🏆 <b>Рейтинг интервалов</b>\n"]
-    for i, (name, pts) in enumerate(rows):
-        mark = medals[i] if i < 3 else f"{i + 1}."
-        lines.append(f"{mark} {html.escape(name)} — {pts}")
-    return "\n".join(lines)
+DAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
 
-
-# ---------- Звук ----------
-
-def make_interval_wav(low_midi, semitones):
-    rate = 22050
-
-    def tone(midi, dur):
-        f = 440 * 2 ** ((midi - 69) / 12)
-        out = []
-        for i in range(int(rate * dur)):
-            t = i / rate
-            env = math.exp(-2.5 * t) * min(1.0, t * 80)  # атака + затухание
-            s = (math.sin(2 * math.pi * f * t)
-                 + 0.4 * math.sin(2 * math.pi * 2 * f * t)
-                 + 0.15 * math.sin(2 * math.pi * 3 * f * t)) * env
-            out.append(s)
-        return out
-
-    samples = tone(low_midi, 1.0) + tone(low_midi + semitones, 1.6)
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        frames = b"".join(
-            struct.pack("<h", int(max(-1.0, min(1.0, s / 1.6)) * 32000))
-            for s in samples
-        )
-        w.writeframes(frames)
-    return buf.getvalue()
-
-
-# ---------- Игра ----------
-
-def _keyboard(qid):
-    buttons = [
-        {"text": INTERVALS[s][0], "callback_data": f"iv:{qid}:{s}"}
-        for s in sorted(INTERVALS)
+DAYS_KEYBOARD = {
+    "inline_keyboard": [
+        [{"text": DAY_SHORT[i], "callback_data": f"day:{i}"} for i in range(0, 3)],
+        [{"text": DAY_SHORT[i], "callback_data": f"day:{i}"} for i in range(3, 6)],
     ]
-    return {"inline_keyboard": [buttons[i:i + 3] for i in range(0, len(buttons), 3)]}
+}
 
+def send_message(chat_id, text, reply_markup=None):
+    markup = MENU_KEYBOARD if reply_markup is None else reply_markup
+    r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                      data={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                            "reply_markup": json.dumps(markup)}, timeout=10)
+    print(f"send {chat_id}: {r.status_code}", flush=True)
+    if r.status_code != 200:
+        print(r.text, flush=True)
 
-def send_interval_question(chat_id):
-    semi = random.randint(1, 12)
-    low = random.randint(52, 64)  # нижний звук: от E3 до E4
-    qid = random.randint(1, 10 ** 6)
-    QUESTIONS[chat_id] = {"qid": qid, "semi": semi, "solved": False, "wrong": set()}
-    wav = make_interval_wav(low, semi)
-    _tg(
-        "sendAudio",
-        data={
-            "chat_id": chat_id,
-            "title": "Какой интервал?",
-            "caption": "🎵 Какой интервал? Кто первый угадает, получает очко",
-            "reply_markup": json.dumps(_keyboard(qid)),
-        },
-        files={"audio": ("interval.wav", wav, "audio/wav")},
-    )
+def lunch_reminder_loop():
+    last_sent = None
+    while True:
+        try:
+            n = now_omsk()
+            if (n.strftime("%H:%M") == LUNCH_TIME
+                    and last_sent != n.date()
+                    and SCHEDULE.get(n.weekday())):
+                for chat_id in LUNCH_CHAT_IDS:
+                    send_message(chat_id, LUNCH_TEXT)
+                last_sent = n.date()
+        except Exception as e:
+            print("lunch:", e, flush=True)
+        time.sleep(20)
 
+HELP_TEXT = (
+    "Привет! Я бот расписания музфака 🎵\n\n"
+    "Команды:\n"
+    "/schedule — расписание на сегодня\n"
+    "/tomorrow — расписание на завтра\n"
+    "/week — расписание на неделю\n"
+    "/next — следующая пара\n"
+    "/time — сколько осталось до перемены / пары\n"
+    "/name — педагоги и предметы\n"
+    "/interval — игра «Угадай интервал» 🎹\n"
+    "/top — рейтинг игры\n"
+    "/help — эта справка"
+)
 
-def handle_callback(cb):
-    """Вызывать из handle_update, если в апдейте есть callback_query."""
-    data = cb.get("data", "")
-    if not data.startswith("iv:"):
-        return False
-    chat_id = cb["message"]["chat"]["id"]
-    message_id = cb["message"]["message_id"]
-    user = cb["from"]
-    name = user.get("first_name") or "Аноним"
-
-    if data == "iv:next":
-        _answer_cb(cb["id"])
-        send_interval_question(chat_id)
-        return True
-
-    _, qid, semi = data.split(":")
-    q = QUESTIONS.get(chat_id)
-    if not q or q["qid"] != int(qid):
-        _answer_cb(cb["id"], "Этот вопрос уже неактуален")
-        return True
-    if q["solved"]:
-        _answer_cb(cb["id"], "Уже угадали 🙂")
-        return True
-    if user["id"] in q["wrong"]:
-        _answer_cb(cb["id"], "Ты уже пробовал(а) в этом вопросе")
-        return True
-
-    if int(semi) == q["semi"]:
-        q["solved"] = True
-        _add_point(chat_id, user["id"], name)
-        _answer_cb(cb["id"], "Верно! 🎉")
-        _tg("editMessageReplyMarkup", {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "reply_markup": json.dumps(
-                {"inline_keyboard": [[{"text": "🎲 Ещё", "callback_data": "iv:next"}]]}
-            ),
-        })
-        short, full = INTERVALS[q["semi"]]
-        _tg("sendMessage", {
-            "chat_id": chat_id,
-            "parse_mode": "HTML",
-            "text": f"✅ {html.escape(name)} угадал(а): <b>{short}</b> ({full}), +1",
-        })
+def handle_update(update):
+    if "callback_query" in update:
+        interval_game.handle_callback(update["callback_query"])
+        return
+    message = update.get("message") or update.get("edited_message")
+    if not message:
+        return
+    chat_id = message["chat"]["id"]
+    text = (message.get("text") or "").strip()
+    print(f"msg {chat_id}: {text!r}", flush=True)
+    if text in BUTTONS:
+        cmd = BUTTONS[text]
+    elif text.startswith("/"):
+        cmd = text.split()[0].lower().split("@")[0]
     else:
-        q["wrong"].add(user["id"])
-        _answer_cb(cb["id"], "Не то 😅 Вторая попытка в этом вопросе недоступна")
-    return True
+        return
+    if cmd in ("/start", "/help"):
+        send_message(chat_id, HELP_TEXT)
+    elif cmd in ("/schedule", "/расписание"):
+        send_message(chat_id, format_schedule(now_omsk().weekday()))
+    elif cmd in ("/tomorrow", "/завтра"):
+        tomorrow = (now_omsk() + timedelta(days=1)).weekday()
+        send_message(chat_id, format_schedule(tomorrow, when="Завтра"))
+    elif cmd in ("/week", "/неделя"):
+        send_message(chat_id, format_week())
+    elif cmd in ("/next", "/следующая"):
+        send_message(chat_id, get_next_pair())
+    elif cmd in ("/time", "/время"):
+        send_message(chat_id, get_time_status())
+    elif cmd == "/chatid":
+        send_message(chat_id, f"ID этого чата: <code>{chat_id}</code>")
+    elif cmd in ("/name", "/имена", "/teachers"):
+        send_message(chat_id, format_teachers())
+    elif cmd in ("/interval", "/интервал"):
+        interval_game.send_interval_question(chat_id)
+    elif cmd in ("/top", "/рейтинг"):
+        send_message(chat_id, interval_game.format_top(chat_id))
+    else:
+        send_message(chat_id, "Неизвестная команда. Напиши /help")
+
+def main():
+    print("Бот запущен", flush=True)
+    interval_game.db_init()
+    threading.Thread(target=lunch_reminder_loop, daemon=True).start()
+    offset = 0
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+    while True:
+        try:
+            resp = requests.get(url, params={"offset": offset, "timeout": 25}, timeout=30)
+            data = resp.json()
+            if not data.get("ok"):
+                print("API:", data, flush=True)
+                time.sleep(3)
+                continue
+            for u in data.get("result", []):
+                offset = u["update_id"] + 1
+                try:
+                    handle_update(u)
+                except Exception as e:
+                    print("err:", e, flush=True)
+                    traceback.print_exc()
+        except Exception as e:
+            print("loop:", e, flush=True)
+            time.sleep(3)
+
+if __name__ == "__main__":
+    main()
